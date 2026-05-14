@@ -4,53 +4,53 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="CUBE LOUNGE 全自動看板", layout="wide")
+st.set_page_config(page_title="CUBE LOUNGE 終極看板", layout="wide")
 
-# --- 自動登入函數 ---
 def get_auto_token():
-    """使用帳密自動獲取最新的 Access-Token"""
+    """模擬完整登入流程"""
+    # 嘗試報表專用登入入口
     login_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
+    payload = {
+        "code": st.secrets["DUDOO_CODE"],
+        "username": st.secrets["DUDOO_USER"],
+        "password": st.secrets["DUDOO_PASS"]
+    }
     
-    # 檢查 Secrets 是否存在
     try:
-        payload = {
-            "code": st.secrets["DUDOO_CODE"],
-            "username": st.secrets["DUDOO_USER"],
-            "password": st.secrets["DUDOO_PASS"]
+        # 使用 Session 並模擬瀏覽器 Header
+        session = requests.Session()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+            "Origin": "https://admin.dudooeat.com",
+            "Referer": "https://admin.dudooeat.com/"
         }
-    except Exception as e:
-        return None, f"Secrets 設定缺失: {str(e)}"
-    
-    try:
-        res = requests.post(login_url, data=payload, timeout=10)
+        res = session.post(login_url, data=payload, headers=headers, timeout=10)
+        
         if res.status_code == 200:
-            token = res.json().get('data', {}).get('access_token')
+            data = res.json()
+            token = data.get('data', {}).get('access_token') or data.get('access_token')
             if token:
                 return token, None
-            return None, "登入成功但未取得 Token，請檢查帳號權限。"
-        else:
-            return None, f"登入失敗 (錯誤碼: {res.status_code})，請檢查帳密是否正確。"
+        return None, "登入成功但找不到通行證，請確認 Secrets 中的店號/帳密是否完全正確。"
     except Exception as e:
-        return None, f"連線至肚肚伺服器失敗: {str(e)}"
+        return None, f"連線失敗: {str(e)}"
 
-# --- 營業日判斷 ---
-def get_business_date(date_str):
-    dt = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-    if 0 <= dt.hour < 5:
-        return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
-    return dt.strftime("%Y-%m-%d")
-
-# --- 數據抓取 ---
 def fetch_data(token, start_date, end_date):
+    """根據截圖提供的精準參數抓取資料"""
+    url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
     headers = {
         "Access-Token": token,
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
     }
-    url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
+    
+    # 完全模擬你截圖中的 Payload
     payload = {
-        "draw": "1", "start": "0", "length": "1000",
-        "hierarchy_id": "17939", "company_id": "13223",
+        "draw": "1",
+        "start": "0",
+        "length": "5000", # 加大長度一次抓完
+        "hierarchy_id": "17939",
+        "company_id": "13223",
         "start_date": start_date.strftime("%Y-%m-%d"),
         "end_date": end_date.strftime("%Y-%m-%d"),
         "time_filter": "bill_create_time"
@@ -59,100 +59,83 @@ def fetch_data(token, start_date, end_date):
     try:
         res = requests.post(url, headers=headers, data=payload, timeout=15)
         if res.status_code != 200:
-            return None, f"抓取失敗，Token 可能過期 (Code: {res.status_code})"
+            return None, "連線報表伺服器失敗。"
         
-        data = res.json().get('data', [])
-        current_biz_day = get_business_date(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        
+        raw_data = res.json().get('data', [])
+        if not raw_data:
+            return None, "此日期範圍內沒有帳單資料。"
+
+        # 處理業績邏輯
         pr_stats = {}
-        total_revenue = 0
+        total_rev = 0
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        for bill in data:
-            if bill.get('status') != 3:
-                continue
+        # 營業日判定 (凌晨5點)
+        def is_today(time_str):
+            dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+            biz_now = datetime.now()
+            if biz_now.hour < 5: biz_now -= timedelta(days=1)
+            target_date = dt
+            if dt.hour < 5: target_date -= timedelta(days=1)
+            return biz_now.date() == target_date.date()
+
+        for bill in raw_data:
+            # 狀態 3 通常是已完成/正常帳單
+            if bill.get('status') != 3: continue
             
-            amount = bill.get('amount', 0)
-            total_revenue += amount
-            biz_day = get_business_date(bill.get('bill_create_time', ""))
-            desk = bill.get('desk') or "未知/散客"
+            val = float(bill.get('amount', 0))
+            total_rev += val
             
-            if desk not in pr_stats:
-                pr_stats[desk] = {"本日": 0, "本月": 0}
+            # 抓取桌號/公關名稱
+            name = bill.get('desk') or "其他"
+            if name not in pr_stats: pr_stats[name] = {"today": 0, "month": 0}
             
-            pr_stats[desk]["本月"] += amount
-            if biz_day == current_biz_day:
-                pr_stats[desk]["本日"] += amount
+            pr_stats[name]["month"] += val
+            if is_today(bill.get('create_time', now_str)):
+                pr_stats[name]["today"] += val
                 
-        return {"total": total_revenue, "pr": pr_stats, "biz_day": current_biz_day}, None
+        return {"total": total_rev, "pr": pr_stats}, None
     except Exception as e:
-        return None, f"抓取過程錯誤: {str(e)}"
+        return None, f"處理資料時出錯: {str(e)}"
 
-# --- 前端介面 ---
-st.title("📊 CUBE LOUNGE 全自動報表系統")
+# --- 介面 ---
+st.title("📊 CUBE LOUNGE 營運報表系統")
 
-# 初始化 Session State
-if "auth_token" not in st.session_state:
-    st.session_state.auth_token = None
+if "token" not in st.session_state: st.session_state.token = None
 
 with st.sidebar:
-    st.header("⚙️ 系統設定")
-    # 修正 width='stretch' 符合 2026 新規範
-    login_clicked = st.button("🔄 重新登入獲取授權", width='stretch')
+    st.header("🔑 系統登入")
+    if st.button("🔄 重新取得授權", width='stretch'):
+        t, err = get_auto_token()
+        if err: st.error(err)
+        else:
+            st.session_state.token = t
+            st.success("授權成功！")
     
-    if login_clicked:
-        with st.spinner("正在登入..."):
-            token, err = get_auto_token()
-            if err:
-                st.error(err)
-            else:
-                st.session_state.auth_token = token
-                st.success("登入成功！")
-
     st.markdown("---")
-    today = datetime.now()
-    start_date = st.date_input("開始日期", today.replace(day=1))
-    end_date = st.date_input("結束日期", today)
-    update_btn = st.button("🚀 更新數據", width='stretch')
+    sd = st.date_input("開始日期", datetime.now().replace(day=1))
+    ed = st.date_input("結束日期", datetime.now())
+    btn = st.button("🚀 更新報表", width='stretch')
 
-# --- 主要內容區 ---
-if update_btn:
-    # 點擊更新時，若無 Token 則自動試試登入
-    if not st.session_state.auth_token:
-        with st.spinner("自動登入中..."):
-            token, err = get_auto_token()
-            if not err:
-                st.session_state.auth_token = token
+if btn:
+    if not st.session_state.token:
+        t, err = get_auto_token()
+        if not err: st.session_state.token = t
+    
+    if st.session_state.token:
+        with st.spinner("讀取中..."):
+            res, err = fetch_data(st.session_state.token, sd, ed)
+            if err: st.error(err)
             else:
-                st.error(f"自動登入失敗: {err}")
-
-    if st.session_state.auth_token:
-        with st.spinner("正在分析數據，請稍後..."):
-            result, error = fetch_data(st.session_state.auth_token, start_date, end_date)
-            if error:
-                st.error(error)
-                st.session_state.auth_token = None
-            else:
-                # 數據看板
-                col1, col2 = st.columns(2)
-                col1.metric("🏠 選擇範圍實收總計", f"${result['total']:,}")
-                today_total = sum(p["本日"] for p in result["pr"].values())
-                col2.metric(f"🌙 今日營業額 ({result['biz_day']})", f"${today_total:,}")
+                c1, c2 = st.columns(2)
+                c1.metric("範圍實收總計", f"${res['total']:,}")
+                today_sum = sum(v['today'] for v in res['pr'].values())
+                c2.metric("今日預估業績", f"${today_sum:,}")
                 
-                st.markdown("---")
-                st.subheader("👤 公關業績排行")
-                df_data = [{"公關/桌號": k, "今日業績": v["本日"], "累積總額": v["本月"]} for k, v in result["pr"].items()]
-                if df_data:
-                    df = pd.DataFrame(df_data).sort_values("累積總額", ascending=False)
-                    st.dataframe(df.style.format({"今日業績": "${:,}", "累積總額": "${:,}"}), width='stretch', hide_index=True)
-                else:
-                    st.write("該範圍內無任何營業數據。")
+                st.subheader("👤 各桌/公關 業績排行")
+                df = pd.DataFrame([{"對象": k, "今日": v["today"], "本月累積": v["month"]} for k, v in res["pr"].items()])
+                if not df.empty:
+                    df = df.sort_values("本月累積", ascending=False)
+                    st.dataframe(df.style.format({"今日": "${:,}", "本月累積": "${:,}"}), width='stretch', hide_index=True)
     else:
-        st.warning("無法獲取授權，請檢查 Secrets 裡的 DUDOO_CODE, DUDOO_USER, DUDOO_PASS 是否正確。")
-else:
-    if not st.session_state.auth_token:
-        st.info("👋 歡迎！請點擊左側「重新登入」或直接點擊「更新數據」。")
-    else:
-        st.success("✅ 系統已就緒，請點擊「更新數據」顯示報表。")
-
-st.markdown("---")
-st.caption(f"Last sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        st.warning("請先完成授權。")
