@@ -35,11 +35,11 @@ def fetch_data(token, start_date, end_date):
     try:
         res = requests.post(url, headers=headers, data=payload)
         if res.status_code != 200:
-            return None, f"連線失敗，錯誤碼：{res.status_code}"
+            return None, f"連線失敗，Token 可能過期或無權限 (錯誤碼：{res.status_code})"
         
         data = res.json().get('data', [])
         if not data:
-            return None, "找不到資料，請確認 Token 或日期是否正確。"
+            return None, "找不到資料，請確認日期範圍是否有帳單。"
         
         # 數據處理
         current_biz_day = get_business_date(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -68,7 +68,7 @@ def fetch_data(token, start_date, end_date):
         return {"total": total_revenue, "pr": pr_stats, "biz_day": current_biz_day}, None
         
     except Exception as e:
-        return None, str(e)
+        return None, f"程式執行錯誤: {str(e)}"
 
 # --- 網頁前端介面 ---
 st.title("📊 CUBE LOUNGE 經營數據看板")
@@ -77,71 +77,57 @@ st.markdown("---")
 # 側邊欄設定
 with st.sidebar:
     st.header("🔑 系統狀態")
-
-    # 自動從 Secrets 讀取 Token，如果讀不到才讓使用者手動輸入
+    
+    # 優先從 Secrets 抓，抓不到才給輸入框
     if "DUDOO_TOKEN" in st.secrets:
         token = st.secrets["DUDOO_TOKEN"]
         st.success("✅ 已自動載入授權碼")
     else:
         token = st.text_input("請輸入 Access Token", type="password")
         st.warning("⚠️ 尚未設定雲端授權碼")
-
-# 執行更新
-if update_btn:
-    result, error = fetch_data(token, start_date, end_date)
     
-    if error:
-        st.error(error)
-    else:
-        # 1. 頂部關鍵指標
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("🏠 全店累計實收 (本月)", f"${result['total']:,}")
-        with col2:
-            # 計算今日全店總額
-            today_total = sum(p["今日業績"] for p in result["pr"].values())
-            st.metric(f"🌙 今日業績 ({result['biz_day']})", f"${today_total:,}")
-            
-        st.markdown("---")
-        
-        # 2. 公關業績表格
-        st.subheader("👤 公關/桌號業績明細")
-        
-        # 轉換數據格式給表格
-        df_data = []
-        for name, s in result["pr"].items():
-            df_data.append({
-                "公關/桌號": name,
-                "本日業績": s["今日業績"],
-                "本月業績": s["本月業績"]
-            })
-        
-        df = pd.DataFrame(df_data).sort_values(by="本月業績", ascending=False)
-        
-        # 設定表格樣式
-        st.dataframe(
-            df.style.format({"本日業績": "${:,}", "本月業績": "${:,}"}),
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        # 3. 簡單圖表分析
-        st.markdown("---")
-        st.subheader("📈 業績佔比分析")
-        chart_col1, chart_col2 = st.columns(2)
-        with chart_col1:
-            st.write("公關業績分佈 (本月)")
-            st.bar_chart(df.set_index("公關/桌號")["本月業績"])
-        with chart_col2:
-            st.info("""
-            **報表說明：**
-            1. 數據已自動**排除作廢單**。
-            2. 時間邏輯：晚上 21:00 至隔日凌晨 04:59 之帳單統一歸類為同一營業日。
-            3. 若數據未更新，請檢查 Token 是否過期。
-            """)
-else:
-    st.info("👋 歡迎回來！請確認左側設定並點擊「更新報表數據」按鈕開始分析。")
+    st.header("📅 查詢範圍")
+    today = datetime.now()
+    start_date = st.date_input("開始日期", today.replace(day=1))
+    end_date = st.date_input("結束日期", today)
+    
+    # 確保按鈕被定義
+    update_btn = st.button("🚀 更新報表數據", use_container_width=True)
 
-# 頁尾
+# 執行更新邏輯 (這一段要確保在按鈕定義之後)
+if update_btn:
+    if not token:
+        st.error("請輸入 Token 才能抓取資料！")
+    else:
+        result, error = fetch_data(token, start_date, end_date)
+        
+        if error:
+            st.error(error)
+        else:
+            # 1. 頂部關鍵指標
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("🏠 全店累計實收 (選擇範圍)", f"${result['total']:,}")
+            with col2:
+                today_total = sum(p["今日業績"] for p in result["pr"].values())
+                st.metric(f"🌙 今日業績 ({result['biz_day']})", f"${today_total:,}")
+                
+            st.markdown("---")
+            
+            # 2. 公關業績表格
+            st.subheader("👤 公關/桌號業績明細")
+            df_data = [{"公關/桌號": k, "本日業績": v["今日業績"], "本月業績": v["本月業績"]} for k, v in result["pr"].items()]
+            df = pd.DataFrame(df_data).sort_values(by="本月業績", ascending=False)
+            
+            st.dataframe(
+                df.style.format({"本日業績": "${:,}", "本月業績": "${:,}"}),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.success(f"數據更新成功！(分析時間: {datetime.now().strftime('%H:%M:%S')})")
+else:
+    st.info("👋 歡迎回來！點擊左側「更新報表數據」按鈕開始分析。")
+
 st.markdown("---")
-st.caption(f"最後更新時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Server Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
