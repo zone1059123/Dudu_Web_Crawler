@@ -7,24 +7,31 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="CUBE LOUNGE 營運看板", layout="wide")
 
 def get_auto_token():
-    """全自動嘗試登入"""
     login_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
+    payload = {
+        "code": st.secrets["DUDOO_CODE"],
+        "username": st.secrets["DUDOO_USER"],
+        "password": st.secrets["DUDOO_PASS"]
+    }
     try:
-        # 這裡會從你設定的 Secrets 抓資料
-        payload = {
-            "code": st.secrets["DUDOO_CODE"],
-            "username": st.secrets["DUDOO_USER"],
-            "password": st.secrets["DUDOO_PASS"]
-        }
         res = requests.post(login_url, data=payload, timeout=10)
-        if res.status_code == 200:
-            # 嘗試抓取所有可能的 Token 位置
-            d = res.json()
-            return d.get('data', {}).get('access_token') or d.get('access_token'), None
-        return None, f"登入失敗 (代碼:{res.status_code})"
+        d = res.json()
+        
+        # 排除萬難找 Token 的邏輯
+        # 1. 找 data 層
+        token = d.get('data', {}).get('access_token')
+        # 2. 如果沒有，找第一層
+        if not token: token = d.get('access_token')
+        # 3. 如果還是沒有，找 user_info 層 (有些 POS 系統會這樣放)
+        if not token: token = d.get('data', {}).get('user_info', {}).get('access_token')
+        
+        if token:
+            return token, None
+            
+        # 如果還是找不到，把整個回傳內容印在畫面上讓我們 debug
+        return None, f"登入成功但結構異常，回傳內容為: {str(d)[:100]}..."
     except Exception as e:
-        return None, str(e)
-
+        return None, f"連線失敗: {str(e)}"
 def fetch_data(token, start_date, end_date):
     """抓取資料邏輯"""
     url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
