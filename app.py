@@ -62,7 +62,12 @@ def get_auto_token():
                 return r_token or token, None
             return token, None
             
-        # 如果還是找不到，把整個回傳的「名字」印出來看
+        # 如果還是找不到，把整個回傳的內容印出來看
+        if result.get('success') is False:
+            err_msg = result.get('error', {}).get('message', '未知錯誤')
+            err_code = result.get('error', {}).get('code', '無代碼')
+            return None, f"登入被拒絕：{err_msg} (代碼: {err_code})"
+            
         return None, f"登入成功但找不到密鑰，欄位有: {list(result.keys())}"
 
     except Exception as e:
