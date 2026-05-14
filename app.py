@@ -7,8 +7,7 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="CUBE LOUNGE 營運看板", layout="wide")
 
 def get_auto_token():
-    """兩段式授權：先登入主系統，再獲取報表權限"""
-    # 第一步：去大門口登入
+    """全能掃描版：自動翻找所有可能的 Token 欄位"""
     main_login_url = "https://pos-api.dudooeat.com/users/login"
     
     payload = {
@@ -19,40 +18,55 @@ def get_auto_token():
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Accept": "application/json"
     }
 
     try:
-        session = requests.Session()
-        # 1. 執行基礎登入
-        res_main = session.post(main_login_url, data=payload, headers=headers, timeout=10)
+        res = requests.post(main_login_url, data=payload, headers=headers, timeout=10)
         
-        if res_main.status_code != 200:
-            return None, f"主系統登入失敗 (代碼: {res_main.status_code})"
+        # 如果失敗，直接回報狀態碼
+        if res.status_code != 200:
+            return None, f"主系統登入拒絕 (代碼: {res.status_code})"
         
-        main_data = res_main.json()
-        base_token = main_data.get('data', {}).get('access_token')
+        result = res.json()
         
-        if not base_token:
-            return None, "拿到回應但找不到基礎 Token"
+        # --- 開始地毯式搜索 Token ---
+        token = None
+        
+        # 1. 常見位置：data 裡的 access_token
+        if isinstance(result.get('data'), dict):
+            token = result['data'].get('access_token') or result['data'].get('token')
+        
+        # 2. 第二常見位置：第一層就是 access_token
+        if not token:
+            token = result.get('access_token') or result.get('token')
+            
+        # 3. 備用位置：隱藏在其他欄位
+        if not token:
+            # 遍歷所有欄位找看看有沒有長得很像 Token 的字串
+            for key, value in result.items():
+                if isinstance(value, str) and len(value) > 20:
+                    token = value
+                    break
 
-        # 第二步：帶著基礎 Token 去換報表權限 (這就是你網址對應的後台動作)
-        report_auth_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
-        report_headers = headers.copy()
-        report_headers["Access-Token"] = base_token
-        
-        res_report = session.post(report_auth_url, data=payload, headers=report_headers, timeout=10)
-        
-        if res_report.status_code == 200:
-            report_data = res_report.json()
-            final_token = report_data.get('data', {}).get('access_token')
-            return final_token, None
-        
-        # 如果報表換票失敗，退而求其次用基礎 Token 試試
-        return base_token, None
+        if token:
+            # 拿到基礎 Token 後，嘗試進入報表系統換正式票
+            report_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
+            r_headers = headers.copy()
+            r_headers["Access-Token"] = token
+            
+            res_r = requests.post(report_url, data=payload, headers=r_headers, timeout=10)
+            if res_r.status_code == 200:
+                r_token = res_r.json().get('data', {}).get('access_token')
+                return r_token or token, None
+            return token, None
+            
+        # 如果還是找不到，把整個回傳的「名字」印出來看
+        return None, f"登入成功但找不到密鑰，欄位有: {list(result.keys())}"
 
     except Exception as e:
-        return None, f"自動登入發生例外: {str(e)}"
+        return None, f"登入發生錯誤: {str(e)}"
 def fetch_data(token, start_date, end_date):
     """抓取資料邏輯"""
     url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
