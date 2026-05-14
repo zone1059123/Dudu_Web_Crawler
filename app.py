@@ -29,7 +29,6 @@ def fetch_data(token, start_date, end_date):
         return None, str(e)
 
 def get_business_date(dt_val):
-    """營業日定義：21:00 ~ 04:00 算同一場"""
     try:
         dt = pd.to_datetime(dt_val)
         if 0 <= dt.hour < 4:
@@ -37,6 +36,27 @@ def get_business_date(dt_val):
         return dt.strftime("%Y-%m-%d")
     except:
         return "Unknown"
+
+# --- 💡 新增：名字合併函數 ---
+def normalize_name(name):
+    """
+    在這裡設定要合併的名字對照表
+    """
+    if not isinstance(name, str): return name
+    
+    # 清除空格
+    name = name.strip()
+    
+    # 合併清單：把「舊名字」全部換成「統一的名字」
+    merge_map = {
+        "Lynn洪": "洪Lynn",
+        "洪lynn": "洪Lynn", # 順便處理大小寫
+        "lynn洪": "洪Lynn",
+        # 如果未來有其他公關要合併，直接加在下面：
+        # "小明": "王小明",
+    }
+    
+    return merge_map.get(name, name)
 
 # --- UI 介面 ---
 st.title("🍹 CUBE LOUNGE 跨夜營業看板")
@@ -51,7 +71,7 @@ with st.sidebar:
     run_button = st.button("🚀 刷新數據", width='stretch', type="primary")
 
 if run_button and user_token:
-    with st.spinner("同步數據中..."):
+    with st.spinner("正在計算並合併公關業績..."):
         raw_data, err = fetch_data(user_token, sd, ed)
         
         if err:
@@ -61,15 +81,14 @@ if run_button and user_token:
         else:
             df = pd.DataFrame(raw_data)
             
-            # --- 根據你提供的清單強制對齊欄位 ---
-            # 時間：使用 bill_create_time
-            # 金額：使用 amount
-            # 公關：使用 desk
-            
-            # 安全轉換與清洗
+            # 安全轉換
             df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
             df['status'] = pd.to_numeric(df['status'], errors='coerce')
-            df = df[df['status'] == 3].copy() # 僅算成功帳單
+            df = df[df['status'] == 3].copy()
+            
+            # --- 💡 名字合併執行點 ---
+            if 'desk' in df.columns:
+                df['desk'] = df['desk'].apply(normalize_name)
             
             # 使用正確的時間欄位
             time_col = 'bill_create_time'
@@ -85,19 +104,18 @@ if run_button and user_token:
 
             # --- 頂部指標 ---
             c1, c2, c3 = st.columns(3)
-            c1.metric("今晚場次業績", f"${today_total:,.0f}", help="21:00 至明晨 04:00")
+            c1.metric("今晚場次業績", f"${today_total:,.0f}")
             c2.metric("所選區間總營收", f"${range_total:,.0f}")
             c3.metric("本場成交單數", f"{len(this_shift_df)} 單")
 
             st.markdown("---")
 
-            # --- 公關排行區 ---
+            # --- 公關排行區 (此時 Lynn 的資料已經合而為一) ---
             col_rank1, col_rank2 = st.columns(2)
             
             with col_rank1:
                 st.subheader("🔥 今晚場次公關排行")
                 if not this_shift_df.empty:
-                    # 使用清單中的 desk 欄位
                     today_rank = this_shift_df.groupby('desk')['amount'].sum().sort_values(ascending=False).reset_index()
                     today_rank.columns = ['公關/桌號', '今晚業績']
                     today_rank.index += 1
@@ -113,10 +131,7 @@ if run_button and user_token:
                     range_rank.index += 1
                     st.table(range_rank.style.format({"累計業績": "${:,.0f}"}))
 
-            # --- 詳細明細 ---
-            with st.expander("📄 查看詳細帳單明細"):
-                # 使用你清單中的現有欄位
-                show_cols = ['bill_create_time', 'b_date', 'desk', 'amount', 'employee_full_name']
-                # 過濾出實際存在的欄位以防萬一
+            with st.expander("📄 查看詳細帳單明細 (已套用名稱合併)"):
+                show_cols = ['bill_create_time', 'b_date', 'desk', 'amount']
                 final_show = [c for c in show_cols if c in df.columns]
                 st.dataframe(range_df[final_show], use_container_width=True)
