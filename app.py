@@ -8,7 +8,6 @@ st.set_page_config(page_title="CUBE LOUNGE Dashboard", layout="wide", page_icon=
 
 def fetch_data(token, start_date, end_date):
     url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
-    # 自動擴大抓取範圍，確保跨夜資料能對齊
     payload = {
         "draw": "1", "start": "0", "length": "5000",
         "hierarchy_id": "17939", "company_id": "13223",
@@ -30,7 +29,7 @@ def fetch_data(token, start_date, end_date):
         return None, str(e)
 
 def get_business_date(dt_val):
-    """自定義營業日：晚上 21:00 ~ 隔天 04:00 算同一場次"""
+    """營業日定義：21:00 ~ 04:00 算同一場"""
     try:
         dt = pd.to_datetime(dt_val)
         if 0 <= dt.hour < 4:
@@ -52,7 +51,7 @@ with st.sidebar:
     run_button = st.button("🚀 刷新數據", width='stretch', type="primary")
 
 if run_button and user_token:
-    with st.spinner("同步跨夜數據中..."):
+    with st.spinner("同步數據中..."):
         raw_data, err = fetch_data(user_token, sd, ed)
         
         if err:
@@ -62,32 +61,19 @@ if run_button and user_token:
         else:
             df = pd.DataFrame(raw_data)
             
-            # --- 自動修正欄位名稱 (關鍵修復) ---
-            # 肚肚有時候會變動欄位大小寫或名稱，這裡做強行校對
-            col_map = {
-                'create_time': ['create_time', 'createTime', 'Time', '時間'],
-                'amount': ['amount', 'total_amount', 'Amount', '金額'],
-                'desk': ['desk', 'table_name', 'desk_name', '桌號', '公關']
-            }
+            # --- 根據你提供的清單強制對齊欄位 ---
+            # 時間：使用 bill_create_time
+            # 金額：使用 amount
+            # 公關：使用 desk
             
-            for target, options in col_map.items():
-                for opt in options:
-                    if opt in df.columns and target not in df.columns:
-                        df[target] = df[opt]
-
-            # 檢查必要欄位是否存在
-            if 'create_time' not in df.columns or 'amount' not in df.columns:
-                st.error("找不到必要的資料欄位 (時間或金額)，請檢查 API 回傳內容。")
-                st.write("目前抓到的欄位有：", list(df.columns))
-                st.stop()
-
-            # 資料清洗
+            # 安全轉換與清洗
             df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
-            if 'status' in df.columns:
-                df = df[pd.to_numeric(df['status'], errors='coerce') == 3].copy()
+            df['status'] = pd.to_numeric(df['status'], errors='coerce')
+            df = df[df['status'] == 3].copy() # 僅算成功帳單
             
-            # 應用營業日定義
-            df['b_date'] = df['create_time'].apply(get_business_date)
+            # 使用正確的時間欄位
+            time_col = 'bill_create_time'
+            df['b_date'] = df[time_col].apply(get_business_date)
             
             # --- 場次業績計算 ---
             current_b_date = get_business_date(datetime.now())
@@ -99,8 +85,8 @@ if run_button and user_token:
 
             # --- 頂部指標 ---
             c1, c2, c3 = st.columns(3)
-            c1.metric("今晚場次業績", f"${today_total:,.0f}")
-            c2.metric("選取區間總營收", f"${range_total:,.0f}")
+            c1.metric("今晚場次業績", f"${today_total:,.0f}", help="21:00 至明晨 04:00")
+            c2.metric("所選區間總營收", f"${range_total:,.0f}")
             c3.metric("本場成交單數", f"{len(this_shift_df)} 單")
 
             st.markdown("---")
@@ -108,28 +94,29 @@ if run_button and user_token:
             # --- 公關排行區 ---
             col_rank1, col_rank2 = st.columns(2)
             
-            # 確定公關顯示欄位
-            display_name = 'desk' if 'desk' in df.columns else '公關/桌號'
-
             with col_rank1:
                 st.subheader("🔥 今晚場次公關排行")
                 if not this_shift_df.empty:
+                    # 使用清單中的 desk 欄位
                     today_rank = this_shift_df.groupby('desk')['amount'].sum().sort_values(ascending=False).reset_index()
-                    today_rank.columns = [display_name, '今晚業績']
+                    today_rank.columns = ['公關/桌號', '今晚業績']
                     today_rank.index += 1
                     st.table(today_rank.style.format({"今晚業績": "${:,.0f}"}))
                 else:
-                    st.info("今晚場次暫無數據（營業時間：21:00 - 04:00）")
+                    st.info("今晚場次暫無數據。")
 
             with col_rank2:
                 st.subheader("🏆 區間累計公關排行")
                 if not range_df.empty:
                     range_rank = range_df.groupby('desk')['amount'].sum().sort_values(ascending=False).reset_index()
-                    range_rank.columns = [display_name, '累計業績']
+                    range_rank.columns = ['公關/桌號', '累計業績']
                     range_rank.index += 1
                     st.table(range_rank.style.format({"累計業績": "${:,.0f}"}))
 
             # --- 詳細明細 ---
             with st.expander("📄 查看詳細帳單明細"):
-                show_cols = [c for c in ['create_time', 'b_date', 'desk', 'amount'] if c in df.columns]
-                st.dataframe(range_df[show_cols], use_container_width=True)
+                # 使用你清單中的現有欄位
+                show_cols = ['bill_create_time', 'b_date', 'desk', 'amount', 'employee_full_name']
+                # 過濾出實際存在的欄位以防萬一
+                final_show = [c for c in show_cols if c in df.columns]
+                st.dataframe(range_df[final_show], use_container_width=True)
