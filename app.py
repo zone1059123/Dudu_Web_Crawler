@@ -76,15 +76,15 @@ st.markdown("---")
 
 # 側邊欄設定
 with st.sidebar:
-    st.header("🔑 系統授權")
-    token = st.text_input("請輸入 Access Token", value="2a3206031d115ae101b3e6c2960e202cf0ea4027", type="password")
-    
-    st.header("📅 查詢範圍")
-    today = datetime.now()
-    start_date = st.date_input("開始日期", today.replace(day=1))
-    end_date = st.date_input("結束日期", today)
-    
-    update_btn = st.button("🚀 更新報表數據", use_container_width=True)
+    st.header("🔑 系統狀態")
+
+    # 自動從 Secrets 讀取 Token，如果讀不到才讓使用者手動輸入
+    if "DUDOO_TOKEN" in st.secrets:
+        token = st.secrets["DUDOO_TOKEN"]
+        st.success("✅ 已自動載入授權碼")
+    else:
+        token = st.text_input("請輸入 Access Token", type="password")
+        st.warning("⚠️ 尚未設定雲端授權碼")
 
 # 執行更新
 if update_btn:
