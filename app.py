@@ -7,44 +7,52 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="CUBE LOUNGE 營運看板", layout="wide")
 
 def get_auto_token():
-    """終極模擬真人登入邏輯"""
-    # 切換回最基礎的登入入口，不要加 ?type=reports
-    login_url = "https://pos-api.dudooeat.com/users/login"
+    """兩段式授權：先登入主系統，再獲取報表權限"""
+    # 第一步：去大門口登入
+    main_login_url = "https://pos-api.dudooeat.com/users/login"
     
-    # 這裡的資料務必對準你的 Secrets
     payload = {
         "code": st.secrets["DUDOO_CODE"],
         "username": st.secrets["DUDOO_USER"],
         "password": st.secrets["DUDOO_PASS"]
     }
     
-    # 偽裝成跟你的 Chrome 一模一樣的 Headers
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest"
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
     }
-    
+
     try:
-        # 使用 Session 維持連線狀態
         session = requests.Session()
-        res = session.post(login_url, data=payload, headers=headers, timeout=10)
+        # 1. 執行基礎登入
+        res_main = session.post(main_login_url, data=payload, headers=headers, timeout=10)
         
-        if res.status_code == 200:
-            d = res.json()
-            # 優先從 data 裡面找 token
-            token = d.get('data', {}).get('access_token') or d.get('access_token')
-            
-            if token:
-                return token, None
-            else:
-                return None, f"登入成功但回傳內容無 Token: {str(d)[:50]}"
+        if res_main.status_code != 200:
+            return None, f"主系統登入失敗 (代碼: {res_main.status_code})"
         
-        return None, f"登入伺服器拒絕請求 (代碼: {res.status_code})"
+        main_data = res_main.json()
+        base_token = main_data.get('data', {}).get('access_token')
         
+        if not base_token:
+            return None, "拿到回應但找不到基礎 Token"
+
+        # 第二步：帶著基礎 Token 去換報表權限 (這就是你網址對應的後台動作)
+        report_auth_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
+        report_headers = headers.copy()
+        report_headers["Access-Token"] = base_token
+        
+        res_report = session.post(report_auth_url, data=payload, headers=report_headers, timeout=10)
+        
+        if res_report.status_code == 200:
+            report_data = res_report.json()
+            final_token = report_data.get('data', {}).get('access_token')
+            return final_token, None
+        
+        # 如果報表換票失敗，退而求其次用基礎 Token 試試
+        return base_token, None
+
     except Exception as e:
-        return None, f"連線異常: {str(e)}"
+        return None, f"自動登入發生例外: {str(e)}"
 def fetch_data(token, start_date, end_date):
     """抓取資料邏輯"""
     url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
