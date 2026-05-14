@@ -59,7 +59,7 @@ def normalize_name(name):
     return merge_map.get(name, name)
 
 # --- UI 介面 ---
-st.title("🍹 SUTSETCUBE")
+st.title("🍹 SUNSETCUBE")
 
 with st.sidebar:
     st.header("🔑 系統授權")
