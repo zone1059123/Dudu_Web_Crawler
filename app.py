@@ -7,71 +7,55 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="CUBE LOUNGE 營運看板", layout="wide")
 
 def get_auto_token():
-    """全能掃描版：自動翻找所有可能的 Token 欄位"""
-    main_login_url = "https://pos-api.dudooeat.com/users/login"
-    
-    payload = {
-        "code": st.secrets["DUDOO_CODE"],
-        "username": st.secrets["DUDOO_USER"],
-        "password": st.secrets["DUDOO_PASS"]
-    }
+    """模擬從開啟網頁到輸入帳密的完整流程"""
+    # 這是真正的後台頁面網址
+    base_url = "https://admin.dudooeat.com/#/login"
+    login_api = "https://pos-api.dudooeat.com/users/login"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Accept": "application/json"
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Origin": "https://admin.dudooeat.com",
+        "Referer": "https://admin.dudooeat.com/",
+        "X-Requested-With": "XMLHttpRequest"
     }
 
     try:
-        res = requests.post(main_login_url, data=payload, headers=headers, timeout=10)
+        session = requests.Session()
         
-        # 如果失敗，直接回報狀態碼
-        if res.status_code != 200:
-            return None, f"主系統登入拒絕 (代碼: {res.status_code})"
+        # 1. 先「造訪」一次首頁，領取伺服器的臨時 Cookie
+        session.get(base_url, headers=headers, timeout=10)
         
+        # 2. 準備帳密資料
+        payload = {
+            "code": st.secrets["DUDOO_CODE"],
+            "username": st.secrets["DUDOO_USER"],
+            "password": st.secrets["DUDOO_PASS"]
+        }
+        
+        # 3. 帶著剛領到的 Cookie 發送登入請求
+        res = session.post(login_api, data=payload, headers=headers, timeout=10)
         result = res.json()
         
-        # --- 開始地毯式搜索 Token ---
-        token = None
-        
-        # 1. 常見位置：data 裡的 access_token
-        if isinstance(result.get('data'), dict):
-            token = result['data'].get('access_token') or result['data'].get('token')
-        
-        # 2. 第二常見位置：第一層就是 access_token
-        if not token:
-            token = result.get('access_token') or result.get('token')
-            
-        # 3. 備用位置：隱藏在其他欄位
-        if not token:
-            # 遍歷所有欄位找看看有沒有長得很像 Token 的字串
-            for key, value in result.items():
-                if isinstance(value, str) and len(value) > 20:
-                    token = value
-                    break
-
-        if token:
-            # 拿到基礎 Token 後，嘗試進入報表系統換正式票
+        if result.get('success'):
+            token = result.get('data', {}).get('access_token')
+            # 拿到基礎 Token 後，再去報表頁面換正式票
             report_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
             r_headers = headers.copy()
             r_headers["Access-Token"] = token
             
-            res_r = requests.post(report_url, data=payload, headers=r_headers, timeout=10)
+            res_r = session.post(report_url, data=payload, headers=r_headers, timeout=10)
             if res_r.status_code == 200:
-                r_token = res_r.json().get('data', {}).get('access_token')
-                return r_token or token, None
+                final_token = res_r.json().get('data', {}).get('access_token')
+                return final_token or token, None
             return token, None
             
-        # 如果還是找不到，把整個回傳的內容印出來看
-        if result.get('success') is False:
-            err_msg = result.get('error', {}).get('message', '未知錯誤')
-            err_code = result.get('error', {}).get('code', '無代碼')
-            return None, f"登入被拒絕：{err_msg} (代碼: {err_code})"
-            
-        return None, f"登入成功但找不到密鑰，欄位有: {list(result.keys())}"
+        else:
+            msg = result.get('error', {}).get('message', '未知錯誤')
+            return None, f"登入被拒絕：{msg}"
 
     except Exception as e:
-        return None, f"登入發生錯誤: {str(e)}"
+        return None, f"連線異常: {str(e)}"
 def fetch_data(token, start_date, end_date):
     """抓取資料邏輯"""
     url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
