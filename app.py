@@ -1,131 +1,113 @@
 import streamlit as st
-import requests
 import pandas as pd
 from datetime import datetime, timedelta
+# 注意：這裡引入的是偽裝能力最強的庫
+from curl_cffi import requests as crequests
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="CUBE LOUNGE 營運看板", layout="wide")
+st.set_page_config(page_title="CUBE LOUNGE 旗艦看板", layout="wide")
 
 def get_auto_token():
-    """模擬從開啟網頁到輸入帳密的完整流程"""
-    # 這是真正的後台頁面網址
-    base_url = "https://admin.dudooeat.com/#/login"
-    login_api = "https://pos-api.dudooeat.com/users/login"
+    """使用 Chrome 120 指紋偽裝登入"""
+    login_url = "https://pos-api.dudooeat.com/users/login"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Origin": "https://admin.dudooeat.com",
-        "Referer": "https://admin.dudooeat.com/",
-        "X-Requested-With": "XMLHttpRequest"
+    payload = {
+        "code": st.secrets["DUDOO_CODE"],
+        "username": st.secrets["DUDOO_USER"],
+        "password": st.secrets["DUDOO_PASS"]
     }
-
+    
     try:
-        session = requests.Session()
+        # impersonate="chrome120" 是為了讓伺服器以為你是真的瀏覽器
+        res = crequests.post(
+            login_url, 
+            data=payload, 
+            impersonate="chrome120", 
+            timeout=15
+        )
         
-        # 1. 先「造訪」一次首頁，領取伺服器的臨時 Cookie
-        session.get(base_url, headers=headers, timeout=10)
-        
-        # 2. 準備帳密資料
-        payload = {
-            "code": st.secrets["DUDOO_CODE"],
-            "username": st.secrets["DUDOO_USER"],
-            "password": st.secrets["DUDOO_PASS"]
-        }
-        
-        # 3. 帶著剛領到的 Cookie 發送登入請求
-        res = session.post(login_api, data=payload, headers=headers, timeout=10)
-        result = res.json()
-        
-        if result.get('success'):
-            token = result.get('data', {}).get('access_token')
-            # 拿到基礎 Token 後，再去報表頁面換正式票
-            report_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
-            r_headers = headers.copy()
-            r_headers["Access-Token"] = token
+        if res.status_code == 200:
+            d = res.json()
+            # 嘗試抓取 Token
+            base_token = d.get('data', {}).get('access_token')
             
-            res_r = session.post(report_url, data=payload, headers=r_headers, timeout=10)
-            if res_r.status_code == 200:
+            if base_token:
+                # 帶著基礎 Token 換取報表權限
+                report_url = "https://pos-api.dudooeat.com/reports/login?type=reports"
+                res_r = crequests.post(
+                    report_url, 
+                    data=payload, 
+                    headers={"Access-Token": base_token},
+                    impersonate="chrome120"
+                )
                 final_token = res_r.json().get('data', {}).get('access_token')
-                return final_token or token, None
-            return token, None
-            
-        else:
-            msg = result.get('error', {}).get('message', '未知錯誤')
-            return None, f"登入被拒絕：{msg}"
-
+                return final_token or base_token, None
+            else:
+                return None, f"登入成功但找不到密鑰: {str(d)[:50]}"
+        
+        return None, f"登入被攔截 (代碼: {res.status_code})"
     except Exception as e:
-        return None, f"連線異常: {str(e)}"
-def fetch_data(token, start_date, end_date):
-    """抓取資料邏輯"""
+        return None, f"模擬器執行失敗: {str(e)}"
+
+def fetch_data(token, sd, ed):
+    """抓取業績數據"""
     url = "https://pos-api.dudooeat.com/reports/getBillInvoicesList?type=reports"
-    headers = {
-        "Access-Token": token,
-        "User-Agent": "Mozilla/5.0",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-    }
     payload = {
         "draw": "1", "start": "0", "length": "5000",
         "hierarchy_id": "17939", "company_id": "13223",
-        "start_date": start_date.strftime("%Y-%m-%d"),
-        "end_date": end_date.strftime("%Y-%m-%d"),
+        "start_date": sd.strftime("%Y-%m-%d"),
+        "end_date": ed.strftime("%Y-%m-%d"),
         "time_filter": "bill_create_time"
     }
-    res = requests.post(url, headers=headers, data=payload, timeout=15)
-    if res.status_code == 200:
-        return res.json().get('data', []), None
-    return None, "Token 已失效"
+    try:
+        res = crequests.post(url, headers={"Access-Token": token}, data=payload, impersonate="chrome120")
+        if res.status_code == 200:
+            return res.json().get('data', []), None
+        return None, "數據抓取失敗"
+    except Exception as e:
+        return None, str(e)
 
-# --- 側邊欄 ---
+# --- 介面 ---
+st.title("📊 CUBE LOUNGE 全自動智慧看板")
+
+if "token" not in st.session_state:
+    st.session_state.token = None
+
 with st.sidebar:
-    st.header("🔐 授權設定")
-    
-    # 模式切換：自動登入 或 手動貼 Token
-    mode = st.radio("選擇授權方式", ["自動登入 (推薦)", "手動貼上 Token"])
-    
-    final_token = None
-    
-    if mode == "自動登入 (推薦)":
-        if st.button("🔄 執行自動登入", width='stretch'):
+    st.header("⚙️ 系統核心")
+    # 如果偏要自動登入，就點這個按鈕
+    if st.button("🚀 執行全自動授權", width='stretch'):
+        with st.spinner("正在模擬真人操作中..."):
             t, err = get_auto_token()
-            if t: 
+            if err:
+                st.error(f"自動登入失敗：{err}")
+            else:
                 st.session_state.token = t
-                st.success("自動登入成功！")
-            else: st.error(f"自動登入失敗：{err}")
-    else:
-        st.info("請貼上 F12 看到的 Access-Token")
-        manual_token = st.text_input("Token", type="password")
-        if manual_token: st.session_state.token = manual_token
+                st.success("✅ 自動授權成功！")
 
     st.markdown("---")
     sd = st.date_input("開始日期", datetime.now().replace(day=1))
     ed = st.date_input("結束日期", datetime.now())
-    update_btn = st.button("🚀 更新業績數據", width='stretch')
+    update_btn = st.button("📈 刷新業績數據", width='stretch')
 
-# --- 主畫面 ---
-st.title("📊 CUBE LOUNGE 實時業績")
-
+# --- 內容區 ---
 if update_btn:
-    current_token = st.session_state.get('token')
-    if not current_token:
-        st.warning("請先完成授權（點擊自動登入或輸入 Token）")
+    if not st.session_state.token:
+        st.warning("請先執行全自動授權。")
     else:
-        data, err = fetch_data(current_token, sd, ed)
-        if err:
-            st.error(f"抓取失敗：{err}")
-        else:
-            # 計算邏輯...
-            df = pd.DataFrame(data)
-            if not df.empty:
-                # 排除作廢
+        with st.spinner("同步數據中..."):
+            data, err = fetch_data(st.session_state.token, sd, ed)
+            if err:
+                st.error(f"抓取失敗：{err}")
+            elif data:
+                df = pd.DataFrame(data)
                 df = df[df['status'] == 3]
-                total = df['amount'].astype(float).sum()
-                st.metric("範圍內總業績", f"${total:,.0f}")
+                df['amount'] = df['amount'].astype(float)
                 
-                # 桌號排行
-                st.subheader("桌號/公關 業績排行")
+                st.metric("範圍實收總計", f"${df['amount'].sum():,.0f}")
+                st.subheader("👤 公關業績排行")
                 res = df.groupby('desk')['amount'].sum().sort_values(ascending=False).reset_index()
-                res.columns = ['桌號/公關', '累積業績']
+                res.columns = ['公關/桌號', '累積業績']
                 st.dataframe(res.style.format({"累積業績": "${:,.0f}"}), width='stretch', hide_index=True)
             else:
-                st.info("此日期範圍內無資料。")
+                st.info("查無資料。")
