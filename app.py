@@ -2,6 +2,12 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
+import pytz
+
+# --- 參數設定區 (請依據杜督益後台實際邏輯微調) ---
+TW_TZ = pytz.timezone('Asia/Taipei')
+CUTOFF_HOUR = 4  # 跨夜營業切換點 (0-23)，目前預設為清晨 4 點前算前一天
+STATUS_FILTER = [3]  # 欲計算的帳單狀態碼 (3通常為已結帳。若後台包含未結帳請改為 [1, 3])
 
 # --- 頁面設定 ---
 st.set_page_config(page_title="CUBE LOUNGE Dashboard", layout="wide", page_icon="📊")
@@ -13,7 +19,7 @@ def fetch_data(token, start_date, end_date):
         "hierarchy_id": "17939", "company_id": "13223",
         "start_date": (start_date - timedelta(days=1)).strftime("%Y-%m-%d"), 
         "end_date": (end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "time_filter": "bill_create_time"
+        "time_filter": "bill_create_time" # 若發現後台是用結帳時間算業績，請改為 "checkout_time"
     }
     headers = {
         "Access-Token": str(token).strip(),
@@ -31,29 +37,21 @@ def fetch_data(token, start_date, end_date):
 def get_business_date(dt_val):
     try:
         dt = pd.to_datetime(dt_val)
-        if 0 <= dt.hour < 4:
+        # 依據設定的跨夜切換點判定營業日
+        if 0 <= dt.hour < CUTOFF_HOUR:
             return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
         return dt.strftime("%Y-%m-%d")
     except:
         return "Unknown"
 
-# --- 💡 新增：名字合併函數 ---
 def normalize_name(name):
-    """
-    在這裡設定要合併的名字對照表
-    """
     if not isinstance(name, str): return name
-    
-    # 清除空格
     name = name.strip()
     
-    # 合併清單：把「舊名字」全部換成「統一的名字」
     merge_map = {
         "Lynn洪": "洪Lynn",
-        "洪lynn": "洪Lynn", # 順便處理大小寫
+        "洪lynn": "洪Lynn", 
         "lynn洪": "洪Lynn",
-        # 如果未來有其他公關要合併，直接加在下面：
-        # "小明": "王小明",
     }
     
     return merge_map.get(name, name)
@@ -66,12 +64,15 @@ with st.sidebar:
     user_token = st.text_input("Access-Token", type="password")
     st.markdown("---")
     st.subheader("📅 查詢區間")
-    sd = st.date_input("開始日期", datetime.now().replace(day=1))
-    ed = st.date_input("結束日期", datetime.now())
+    
+    # 修正：確保預設日期也是使用台灣時區
+    now_tw = datetime.now(TW_TZ)
+    sd = st.date_input("開始日期", now_tw.replace(day=1))
+    ed = st.date_input("結束日期", now_tw.date())
     run_button = st.button("🚀 刷新數據", width='stretch', type="primary")
 
 if run_button and user_token:
-    with st.spinner("正在計算並合併公關業績..."):
+    with st.spinner("正在套用台灣時區並計算數據..."):
         raw_data, err = fetch_data(user_token, sd, ed)
         
         if err:
@@ -81,21 +82,23 @@ if run_button and user_token:
         else:
             df = pd.DataFrame(raw_data)
             
-            # 安全轉換
+            # 安全轉換與狀態碼彈性過濾
             df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
             df['status'] = pd.to_numeric(df['status'], errors='coerce')
-            df = df[df['status'] == 3].copy()
+            df = df[df['status'].isin(STATUS_FILTER)].copy()
             
-            # --- 💡 名字合併執行點 ---
             if 'desk' in df.columns:
                 df['desk'] = df['desk'].apply(normalize_name)
             
-            # 使用正確的時間欄位
+            # 使用正確的時間欄位判定營業日
             time_col = 'bill_create_time'
-            df['b_date'] = df[time_col].apply(get_business_date)
+            if time_col in df.columns:
+                df['b_date'] = df[time_col].apply(get_business_date)
+            else:
+                df['b_date'] = "Unknown"
             
-            # --- 場次業績計算 ---
-            current_b_date = get_business_date(datetime.now())
+            # --- 場次業績計算 (修正：採用台灣時間獲取當前營業日) ---
+            current_b_date = get_business_date(datetime.now(TW_TZ))
             this_shift_df = df[df['b_date'] == current_b_date].copy()
             today_total = this_shift_df['amount'].sum()
             
@@ -110,7 +113,7 @@ if run_button and user_token:
 
             st.markdown("---")
 
-            # --- 公關排行區 (此時 Lynn 的資料已經合而為一) ---
+            # --- 公關排行區 ---
             col_rank1, col_rank2 = st.columns(2)
             
             with col_rank1:
@@ -131,7 +134,7 @@ if run_button and user_token:
                     range_rank.index += 1
                     st.table(range_rank.style.format({"累計業績": "${:,.0f}"}))
 
-            with st.expander("📄 查看詳細帳單明細 (已套用名稱合併)"):
-                show_cols = ['bill_create_time', 'b_date', 'desk', 'amount']
+            with st.expander("📄 查看詳細帳單明細 (已套用時區校正)"):
+                show_cols = ['bill_create_time', 'b_date', 'desk', 'amount', 'status']
                 final_show = [c for c in show_cols if c in df.columns]
                 st.dataframe(range_df[final_show], use_container_width=True)
