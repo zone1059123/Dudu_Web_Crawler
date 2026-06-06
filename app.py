@@ -10,7 +10,7 @@ STATUS_FILTER = [3]
 
 # 💡 破案關鍵：請在這裡填寫代表「銷售金額」的 API 欄位名稱！
 # 常見的名稱可能是 'sales_amount', 'actual_price', 'total_price', 'subtotal'
-TARGET_AMOUNT_COL = 'sales_amount'  # <--- 如果名稱不同，請修改這行
+TARGET_AMOUNT_COL = 'sale_amount'  # <--- 如果名稱不同，請修改這行
 
 # --- 頁面設定 ---
 st.set_page_config(page_title="CUBE LOUNGE Dashboard", layout="wide", page_icon="📊")
