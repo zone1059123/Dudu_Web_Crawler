@@ -6,9 +6,11 @@ import pytz
 
 # --- 參數設定區 ---
 TW_TZ = pytz.timezone('Asia/Taipei')
-CUTOFF_HOUR = 4  
-# 💡 退回只抓 3 (已結帳)。加了 1 會爆表代表後台不算未結單。
 STATUS_FILTER = [3]  
+
+# 💡 破案關鍵：請在這裡填寫代表「銷售金額」的 API 欄位名稱！
+# 常見的名稱可能是 'sales_amount', 'actual_price', 'total_price', 'subtotal'
+TARGET_AMOUNT_COL = 'sales_amount'  # <--- 如果名稱不同，請修改這行
 
 # --- 頁面設定 ---
 st.set_page_config(page_title="CUBE LOUNGE Dashboard", layout="wide", page_icon="📊")
@@ -35,9 +37,9 @@ def fetch_data(token, start_date, end_date):
     except Exception as e:
         return None, str(e)
 
-def get_business_date(dt):
+def get_business_date(dt, cutoff):
     try:
-        if 0 <= dt.hour < CUTOFF_HOUR:
+        if 0 <= dt.hour < cutoff:
             return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
         return dt.strftime("%Y-%m-%d")
     except:
@@ -59,16 +61,20 @@ st.title("🍹 SUNSETCUBE")
 with st.sidebar:
     st.header("🔑 系統授權")
     user_token = st.text_input("Access-Token", type="password")
+    
+    st.markdown("---")
+    st.subheader("⚙️ 營業設定")
+    cutoff_hour = st.number_input("營業日切換時間 (凌晨幾點)", min_value=0, max_value=12, value=4)
+    
     st.markdown("---")
     st.subheader("📅 查詢區間")
-    
     now_tw = datetime.now(TW_TZ)
     sd = st.date_input("開始日期", now_tw.replace(day=1))
-    ed = st.date_input("結束日期", now_tw.date())
+    ed = st.date_input("結束日期", now_tw.date() - timedelta(days=1)) 
     run_button = st.button("🚀 刷新數據", width='stretch', type="primary")
 
 if run_button and user_token:
-    with st.spinner("正在讀取並比對數據..."):
+    with st.spinner(f"正在以 {TARGET_AMOUNT_COL} 重新計算業績..."):
         raw_data, err = fetch_data(user_token, sd, ed)
         
         if err:
@@ -76,37 +82,39 @@ if run_button and user_token:
         elif not raw_data:
             st.info("該日期範圍內查無數據。")
         else:
-            # === 原始資料預處理 (用於除錯與過濾) ===
             df_raw = pd.DataFrame(raw_data)
-            df_raw['amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
+            
+            # 💡 抽換業績欄位核心邏輯
+            if TARGET_AMOUNT_COL in df_raw.columns:
+                df_raw['calc_amount'] = pd.to_numeric(df_raw[TARGET_AMOUNT_COL], errors='coerce').fillna(0)
+            else:
+                st.warning(f"⚠️ 找不到您指定的 '{TARGET_AMOUNT_COL}' 欄位，系統暫時退回使用 'amount' 計算。請去最下方的面板檢查正確的欄位名稱！")
+                df_raw['calc_amount'] = pd.to_numeric(df_raw['amount'], errors='coerce').fillna(0)
+                
             df_raw['status'] = pd.to_numeric(df_raw['status'], errors='coerce')
             
             time_col = 'bill_create_time'
             if time_col in df_raw.columns:
                 df_raw[time_col] = pd.to_datetime(df_raw[time_col])
-                df_raw['b_date'] = df_raw[time_col].apply(get_business_date)
+                df_raw['b_date'] = df_raw[time_col].apply(lambda x: get_business_date(x, cutoff_hour))
             else:
                 df_raw['b_date'] = "Unknown"
 
-            # === 正式業績資料過濾 ===
+            # 過濾狀態碼
             df = df_raw[df_raw['status'].isin(STATUS_FILTER)].copy()
-            
             if 'desk' in df.columns:
                 df['desk'] = df['desk'].apply(normalize_name)
             
-            current_b_date = get_business_date(datetime.now(TW_TZ))
+            current_b_date = get_business_date(datetime.now(TW_TZ), cutoff_hour)
             this_shift_df = df[df['b_date'] == current_b_date].copy()
-            today_total = this_shift_df['amount'].sum()
+            # 改用 calc_amount 加總
+            today_total = this_shift_df['calc_amount'].sum()
             
             start_date_str = sd.strftime("%Y-%m-%d")
             end_date_str = ed.strftime("%Y-%m-%d")
-            prev_date_str = (sd - timedelta(days=1)).strftime("%Y-%m-%d")
-
-            condition_a = (df['b_date'] >= start_date_str) & (df['b_date'] <= end_date_str)
-            condition_b = (df['b_date'] == prev_date_str) & (df[time_col].dt.date == sd) & (df[time_col].dt.hour < CUTOFF_HOUR)
-
-            range_df = df[condition_a | condition_b].copy()
-            range_total = range_df['amount'].sum()
+            range_df = df[(df['b_date'] >= start_date_str) & (df['b_date'] <= end_date_str)].copy()
+            # 改用 calc_amount 加總
+            range_total = range_df['calc_amount'].sum()
 
             # --- 頂部指標 ---
             c1, c2, c3 = st.columns(3)
@@ -115,12 +123,11 @@ if run_button and user_token:
             c3.metric("本場成交單數", f"{len(this_shift_df)} 單")
             st.markdown("---")
 
-            # --- 公關排行區 ---
             col_rank1, col_rank2 = st.columns(2)
             with col_rank1:
                 st.subheader("🔥 今晚場次公關排行")
                 if not this_shift_df.empty:
-                    today_rank = this_shift_df.groupby('desk')['amount'].sum().sort_values(ascending=False).reset_index()
+                    today_rank = this_shift_df.groupby('desk')['calc_amount'].sum().sort_values(ascending=False).reset_index()
                     today_rank.columns = ['公關/桌號', '今晚業績']
                     today_rank.index += 1
                     st.table(today_rank.style.format({"今晚業績": "${:,.0f}"}))
@@ -130,27 +137,16 @@ if run_button and user_token:
             with col_rank2:
                 st.subheader("🏆 區間累計公關排行")
                 if not range_df.empty:
-                    range_rank = range_df.groupby('desk')['amount'].sum().sort_values(ascending=False).reset_index()
+                    range_rank = range_df.groupby('desk')['calc_amount'].sum().sort_values(ascending=False).reset_index()
                     range_rank.columns = ['公關/桌號', '累計業績']
                     range_rank.index += 1
                     st.table(range_rank.style.format({"累計業績": "${:,.0f}"}))
 
-            # --- 💡 新增：抓漏透視面板 ---
+            # --- 💡 抓漏面板 ---
             st.markdown("---")
-            with st.expander("🛠️ 抓漏透視面板 (點此展開比對落差)"):
-                st.write("以下數據包含 **API 抓回來的所有原始帳單**（未過濾狀態碼），請比對看看後台是不是偷藏了什麼我們沒算到的項目：")
-                
-                diag_c1, diag_c2 = st.columns(2)
-                with diag_c1:
-                    st.markdown("**1. 找出隱藏的狀態碼**")
-                    st.write("除了 1(未結) 和 3(已結)，有沒有其他狀態碼（例如 2, 4, 5）帶有金額？")
-                    status_summary = df_raw.groupby('status')['amount'].sum().reset_index()
-                    st.dataframe(status_summary.style.format({"amount": "${:,.0f}"}), use_container_width=True)
-                
-                with diag_c2:
-                    st.markdown("**2. 單日營業額比對**")
-                    st.write("核對下表每天的總額，看是「哪一天」跟後台報表對不上？")
-                    # 只看查詢區間內的單日總和 (以防 API 吐太多天的資料)
-                    df_raw_range = df_raw[(df_raw['b_date'] >= start_date_str) & (df_raw['b_date'] <= end_date_str)]
-                    date_summary = df_raw_range[df_raw_range['status'] == 3].groupby('b_date')['amount'].sum().reset_index()
-                    st.dataframe(date_summary.style.format({"amount": "${:,.0f}"}), use_container_width=True)
+            with st.expander("🛠️ API 原始資料檢查 (用來尋找正確的銷售金額欄位)"):
+                st.write("如果您不確定「銷售金額」在 API 裡的英文是什麼，請看下方這張表：")
+                if not df_raw.empty:
+                    sample_data = df_raw.iloc[0:1].T
+                    sample_data.columns = ['第一筆訂單的數值']
+                    st.dataframe(sample_data, height=400)
