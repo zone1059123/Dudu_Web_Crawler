@@ -4,10 +4,10 @@ import requests
 from datetime import datetime, timedelta
 import pytz
 
-# --- 參數設定區 (請依據杜督益後台實際邏輯微調) ---
+# --- 參數設定區 ---
 TW_TZ = pytz.timezone('Asia/Taipei')
 CUTOFF_HOUR = 4  # 跨夜營業切換點 (0-23)，目前預設為清晨 4 點前算前一天
-STATUS_FILTER = [3]  # 欲計算的帳單狀態碼 (3通常為已結帳。若後台包含未結帳請改為 [1, 3])
+STATUS_FILTER = [1, 3]  # 💡 修改點 1：包含 1(未結帳/現場客) 與 3(已結帳)，避免漏掉還在喝或掛帳的營收
 
 # --- 頁面設定 ---
 st.set_page_config(page_title="CUBE LOUNGE Dashboard", layout="wide", page_icon="📊")
@@ -17,9 +17,9 @@ def fetch_data(token, start_date, end_date):
     payload = {
         "draw": "1", "start": "0", "length": "5000",
         "hierarchy_id": "17939", "company_id": "13223",
-        "start_date": (start_date - timedelta(days=1)).strftime("%Y-%m-%d"), 
+        "start_date": (start_date - timedelta(days=2)).strftime("%Y-%m-%d"), # 💡 往前多抓一天，確保跨夜資料完整
         "end_date": (end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
-        "time_filter": "bill_create_time" # 若發現後台是用結帳時間算業績，請改為 "checkout_time"
+        "time_filter": "bill_create_time" 
     }
     headers = {
         "Access-Token": str(token).strip(),
@@ -34,10 +34,9 @@ def fetch_data(token, start_date, end_date):
     except Exception as e:
         return None, str(e)
 
-def get_business_date(dt_val):
+def get_business_date(dt):
+    # 傳入的 dt 已經是 datetime 物件
     try:
-        dt = pd.to_datetime(dt_val)
-        # 依據設定的跨夜切換點判定營業日
         if 0 <= dt.hour < CUTOFF_HOUR:
             return (dt - timedelta(days=1)).strftime("%Y-%m-%d")
         return dt.strftime("%Y-%m-%d")
@@ -53,7 +52,6 @@ def normalize_name(name):
         "洪lynn": "洪Lynn", 
         "lynn洪": "洪Lynn",
     }
-    
     return merge_map.get(name, name)
 
 # --- UI 介面 ---
@@ -65,14 +63,13 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📅 查詢區間")
     
-    # 修正：確保預設日期也是使用台灣時區
     now_tw = datetime.now(TW_TZ)
     sd = st.date_input("開始日期", now_tw.replace(day=1))
     ed = st.date_input("結束日期", now_tw.date())
     run_button = st.button("🚀 刷新數據", width='stretch', type="primary")
 
 if run_button and user_token:
-    with st.spinner("正在套用台灣時區並計算數據..."):
+    with st.spinner("正在計算並校正跨夜數據..."):
         raw_data, err = fetch_data(user_token, sd, ed)
         
         if err:
@@ -82,27 +79,40 @@ if run_button and user_token:
         else:
             df = pd.DataFrame(raw_data)
             
-            # 安全轉換與狀態碼彈性過濾
+            # --- 資料清洗與型態轉換 ---
             df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
             df['status'] = pd.to_numeric(df['status'], errors='coerce')
+            
+            # 💡 套用狀態碼過濾 (包含未結帳)
             df = df[df['status'].isin(STATUS_FILTER)].copy()
             
             if 'desk' in df.columns:
                 df['desk'] = df['desk'].apply(normalize_name)
             
-            # 使用正確的時間欄位判定營業日
+            # 確保時間欄位轉換為 datetime 物件，方便後續精確計算
             time_col = 'bill_create_time'
             if time_col in df.columns:
+                df[time_col] = pd.to_datetime(df[time_col])
                 df['b_date'] = df[time_col].apply(get_business_date)
             else:
                 df['b_date'] = "Unknown"
             
-            # --- 場次業績計算 (修正：採用台灣時間獲取當前營業日) ---
+            # --- 場次業績計算 ---
             current_b_date = get_business_date(datetime.now(TW_TZ))
             this_shift_df = df[df['b_date'] == current_b_date].copy()
             today_total = this_shift_df['amount'].sum()
             
-            range_df = df[(df['b_date'] >= sd.strftime("%Y-%m-%d")) & (df['b_date'] <= ed.strftime("%Y-%m-%d"))].copy()
+            # 💡 修改點 2：修復首日凌晨被切掉的邏輯
+            start_date_str = sd.strftime("%Y-%m-%d")
+            end_date_str = ed.strftime("%Y-%m-%d")
+            prev_date_str = (sd - timedelta(days=1)).strftime("%Y-%m-%d")
+
+            # 條件A：營業日在選擇的區間內
+            condition_a = (df['b_date'] >= start_date_str) & (df['b_date'] <= end_date_str)
+            # 條件B：營業日被算成前一天，但實際開單時間是「查詢首日的凌晨」
+            condition_b = (df['b_date'] == prev_date_str) & (df[time_col].dt.date == sd) & (df[time_col].dt.hour < CUTOFF_HOUR)
+
+            range_df = df[condition_a | condition_b].copy()
             range_total = range_df['amount'].sum()
 
             # --- 頂部指標 ---
@@ -134,7 +144,14 @@ if run_button and user_token:
                     range_rank.index += 1
                     st.table(range_rank.style.format({"累計業績": "${:,.0f}"}))
 
-            with st.expander("📄 查看詳細帳單明細 (已套用時區校正)"):
+            with st.expander("📄 查看詳細帳單明細 (已套用時區與跨夜校正)"):
+                # 方便檢查狀態碼，將 status 加進顯示列表
                 show_cols = ['bill_create_time', 'b_date', 'desk', 'amount', 'status']
                 final_show = [c for c in show_cols if c in df.columns]
-                st.dataframe(range_df[final_show], use_container_width=True)
+                
+                # 將時間格式化得更易讀一點
+                display_df = range_df[final_show].copy()
+                if time_col in display_df.columns:
+                    display_df[time_col] = display_df[time_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                st.dataframe(display_df, use_container_width=True)
